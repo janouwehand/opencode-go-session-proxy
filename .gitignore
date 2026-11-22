@@ -1,0 +1,49 @@
+# Build output
+bin/
+obj/
+publish/
+artifacts/
+
+# Visual Studio / Rider / VS Code user state
+.vs/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+
+# Test and coverage output
+TestResults/
+*.trx
+coverage/
+coverage.*
+*.coverage
+*.coveragexml
+
+# Local configuration and secrets
+# The committed appsettings.json contains no secrets; keep local overrides and keys out of git.
+appsettings.Development.json
+appsettings.*.local.json
+*.local.json
+.env
+.env.*
+!.env.example
+
+# Session state written by the proxy when Proxy:SessionStorePath points into the repo
+session.json
+
+# Logs and crash dumps
+*.log
+logs/
+*.dmp
+*.stackdump
+
+# Publish/runtime leftovers
+*.pdb
+*.cache
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
