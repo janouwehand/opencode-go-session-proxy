@@ -42,6 +42,7 @@ the official OpenCode client.
 | Build and run from source | .NET 10 SDK (ASP.NET Core 10 runtime) on Windows 11 |
 | Run the published build | Nothing else (self-contained executable, no Docker/WSL/IIS/IIS Express/YARP) |
 | Actual inference | An OpenCode Go API key (`oc_sk_...`) with an active Go allowance |
+| Install as a Windows service (optional) | Administrator rights, one time (see §16) |
 
 Check the SDK:
 
@@ -63,8 +64,12 @@ OpenCodeGoProxy/
       ProxyForwarder.cs                forwarding, streaming, error handling
       SessionResolver.cs               x-opencode-session resolution + persistent store
       ProxyOptions.cs                  configuration parsing and validation
+      Logging/FileLoggerProvider.cs    rolling file log used when running headless
   tests/
     OpenCodeGoProxy.Tests/              xUnit tests with a mocked upstream
+  deploy/
+    install-service.ps1                installs the published build as a Windows service
+    uninstall-service.ps1              stops and removes the service (data optional)
   specs/
     001-initial/initial.md             specification
 ```
@@ -92,10 +97,15 @@ Expected startup output:
 
 ```text
 info: OpenCodeGoProxy[0]
-      Proxy started on http://127.0.0.1:8765 -> https://opencode.ai/inference/go (session mode: Auto)
+      Proxy started on http://127.0.0.1:8765 -> https://opencode.ai/inference/go
+      (session mode: Auto, session store: C:\Users\<you>\AppData\Local\OpenCodeGoProxy,
+      log directory: (console only))
 ```
 
 The proxy refuses to start if `Proxy:Host` is not a loopback address.
+
+To run it permanently (at boot, without a console window or a logged-on user), install it as
+a Windows service - see §16. Clients keep using the same base URL.
 
 ## 5. Configuration
 
@@ -123,8 +133,10 @@ The proxy refuses to start if `Proxy:Host` is not a loopback address.
 | `Proxy:UpstreamBaseUrl` | `https://opencode.ai/inference/go` | Fixed upstream base. `http://` is accepted only for loopback (tests). No query/fragment allowed. |
 | `Proxy:SessionMode` | `Auto` | Only `Auto` is implemented in the MVP; other values log a warning and behave as `Auto`. |
 | `Proxy:Logging` | `Minimal` | `Minimal` → Information, `Verbose`/`Debug` → Debug, `Quiet`/`Warning` → Warning, `Error` → Error (applied to the proxy's own log category). |
-| `Proxy:SessionStorePath` | `%LOCALAPPDATA%\OpenCodeGoProxy` | Directory for `session.json`. Mainly useful for tests. |
+| `Proxy:SessionStorePath` | `%LOCALAPPDATA%\OpenCodeGoProxy` (`%ProgramData%\OpenCodeGoProxy` when running as a service) | Directory for `session.json`. |
 | `Proxy:SessionId` | *(none)* | Explicit fallback session ID. Prefer `OPENCODE_GO_SESSION_ID`. |
+| `Proxy:ApiKey` | *(none)* | Static API key. `OPENCODE_GO_API_KEY` wins. Lets a service keep its key in `appsettings.Production.json` instead of an environment variable. |
+| `Proxy:LogDirectory` | *(none)*; `%ProgramData%\OpenCodeGoProxy\logs` when running as a service | Enables rolling file logging in this directory. Unset in console mode = console only. |
 
 Environment variables (they override `appsettings.json`; ASP.NET Core `__` maps nesting):
 
@@ -132,7 +144,7 @@ Environment variables (they override `appsettings.json`; ASP.NET Core `__` maps 
 | --- | --- |
 | `OPENCODE_GO_API_KEY` | Upstream API key used for every request (Mode B). Never written to disk or logs. |
 | `OPENCODE_GO_SESSION_ID` | Explicit fallback session ID (overrides `Proxy:SessionId`). |
-| `Proxy__Host`, `Proxy__Port`, `Proxy__UpstreamBaseUrl`, `Proxy__Logging`, `Proxy__SessionStorePath` | Any `appsettings.json` value. |
+| `Proxy__Host`, `Proxy__Port`, `Proxy__UpstreamBaseUrl`, `Proxy__Logging`, `Proxy__SessionStorePath`, `Proxy__ApiKey`, `Proxy__LogDirectory` | Any `appsettings.json` value. |
 
 Example session override:
 
@@ -353,6 +365,10 @@ Do not claim successful real-API integration until step 1–4 have actually pass
 ## 13. Security notes
 
 - Binds exclusively to `127.0.0.1`; non-loopback hosts are rejected at startup.
+- Loopback is machine-wide: every local process of every user can reach the port, and the
+  Windows firewall does not filter loopback traffic. In Mode B (a configured key) that means
+  other local users could spend your OpenCode Go allowance. On a shared machine, prefer a
+  per-user setup (Task Scheduler at logon) or add a local authentication token.
 - No CORS headers are added; browsers on other origins cannot use it by default.
 - TLS certificate validation for the upstream is left at .NET defaults (never disabled).
 - `Authorization`, `x-api-key` and bodies are never logged; prompts and completions are
@@ -377,7 +393,10 @@ Do not claim successful real-API integration until step 1–4 have actually pass
 | `Configuration error: Proxy:Host ... is not a loopback address` | Deliberate: the proxy must stay on localhost. |
 | Session store warning on startup | `%LOCALAPPDATA%\OpenCodeGoProxy` is not writable. The proxy falls back to an in-memory session that changes on restart. |
 | Session file looks wrong/corrupt | Delete `%LOCALAPPDATA%\OpenCodeGoProxy\session.json`; a new ID is generated on the next request. |
-| No log output | Set `"Logging": "Verbose"` in `Proxy:Logging` (or `Proxy__Logging=Verbose`). |
+| No log output | Set `"Logging": "Verbose"` in `Proxy:Logging` (or `Proxy__Logging=Verbose`). A service writes to `%ProgramData%\OpenCodeGoProxy\logs` instead of the console; check `Proxy:LogDirectory`. |
+| Service stops immediately after start | Configuration error. Check `%ProgramData%\OpenCodeGoProxy\logs\startup-error.log` and `Get-EventLog -LogName Application -Source OpenCodeGoProxy -Newest 10`. |
+| Service is running but the key is rejected (`401`) | User environment variables do not reach services. Set the key via `.\deploy\install-service.ps1 -ApiKey ...`, in the service `Environment` registry value, or in `appsettings.Production.json` in the install folder. |
+| `Error 1053`: service did not respond in a timely fashion | The exe was started as a service without SCM support - use `deploy\install-service.ps1` and a build that includes `Microsoft.Extensions.Hosting.WindowsServices`. |
 
 ## 15. Publishing a self-contained Windows executable
 
@@ -397,7 +416,110 @@ The publish folder contains `appsettings.json`; edit that copy (or rebuild after
 root file). No WSL, Docker, IIS or extra services are required, and no administrator rights
 are needed. Do not enable trimming for this app.
 
-## 16. Assumptions and deviations
+To install the published build as a Windows service, continue with §16.
+
+## 16. Installing as a Windows service
+
+The proxy can run as a native Windows service: available at boot, no console window, no
+logged-on user required. Clients keep using `http://127.0.0.1:8765/v1`; nothing changes on
+their side.
+
+### 16.1 Publish
+
+```powershell
+dotnet publish .\src\OpenCodeGoProxy\OpenCodeGoProxy.csproj -c Release -r win-x64 `
+  --self-contained true -p:PublishSingleFile=true
+```
+
+### 16.2 Install
+
+From an **elevated** PowerShell session:
+
+```powershell
+cd C:\dev\opencodegoproxy
+.\deploy\install-service.ps1 -ApiKey 'oc_sk_...'
+```
+
+The script:
+
+- copies the publish output to `C:\Program Files\OpenCodeGoProxy`;
+- creates `C:\ProgramData\OpenCodeGoProxy` (session store) and `...\logs`;
+- registers the `OpenCodeGoProxy` Application event log source;
+- creates the service with **Automatic (Delayed Start)** and restart-on-failure actions
+  (5 s, 30 s, 60 s; failure counter reset daily);
+- writes service-scoped environment variables (`OPENCODE_GO_API_KEY`,
+  `Proxy__SessionStorePath`, `Proxy__LogDirectory`) under the service's registry key - user
+  environment variables are *not* inherited by services;
+- starts the service and probes `/healthz`.
+
+A key you set as a **user** environment variable (for the console build) is therefore not
+enough for the service. Either pass `-ApiKey 'oc_sk_...'` (or `-ApiKey $env:OPENCODE_GO_API_KEY`
+when the elevated shell inherited your user environment), or put the key in
+`appsettings.Production.json` in the install folder. Symptom when it is missing: clients that
+send no credential of their own get a local `401` "No API key available".
+
+Useful parameters: `-ServiceAccount LocalService` (least privilege; the script grants the
+required ACLs), `-InstallPath`, `-DataPath`, `-SkipHealthCheck`, `-Force` (replace an
+existing service), `-WhatIf` (print the plan, change nothing).
+
+The health probe targets `http://127.0.0.1:8765/healthz`; if you changed `Proxy:Port`, pass
+`-SkipHealthCheck` (the service itself is installed either way).
+
+Prefer not to pass the key on the command line? Put it in
+`C:\Program Files\OpenCodeGoProxy\appsettings.Production.json`; that file is loaded
+automatically and preserved by reinstalls:
+
+```json
+{ "Proxy": { "ApiKey": "oc_sk_..." } }
+```
+
+Restart the service after editing it. The key is never written to the log files.
+
+### 16.3 Logs
+
+A service has no console, so the proxy writes rolling files to
+`C:\ProgramData\OpenCodeGoProxy\logs`:
+
+| File | Content |
+| --- | --- |
+| `proxy-yyyyMMdd.log` | One file per UTC day: proxy requests, session source, upstream status, errors with stack traces, host lifecycle. |
+| `proxy-yyyyMMdd.N.log` | The same day rolled over after 10 MB (`.1`, `.2`, ...). |
+| `startup-error.log` | Configuration errors that prevented the service from starting. |
+
+Files older than 7 days are removed at startup. Request bodies, `Authorization`, `x-api-key`
+and prompts are never logged. The Windows event log receives only Warning and worse, so it
+is not flooded by the four informational lines per proxied request.
+
+Override the directory with `Proxy:LogDirectory` (`Proxy__LogDirectory`). In console mode no
+file log is written unless that setting is present.
+
+### 16.4 Verify, upgrade, remove
+
+```powershell
+Get-Service OpenCodeGoProxy
+Invoke-RestMethod http://127.0.0.1:8765/healthz
+Get-ChildItem C:\ProgramData\OpenCodeGoProxy\logs\proxy-*.log |
+  Sort-Object LastWriteTime | Select-Object -Last 1 | Get-Content -Tail 50
+```
+
+- **Upgrade**: re-run `.\deploy\install-service.ps1 -Force` (add `-ApiKey` unless the key
+  lives in `appsettings.Production.json`; the service `Environment` value is rewritten as a
+  whole). `appsettings.Production.json` in the install folder is preserved.
+- **Remove**: `.\deploy\uninstall-service.ps1` (`-KeepData` keeps `session.json` and the
+  logs, `-KeepEventSource` keeps the event log source). Safe to re-run.
+
+### 16.5 Service-mode security notes
+
+- The service listens on loopback only, exactly like the console build; no firewall rule is
+  needed and none would apply.
+- Loopback is machine-wide: any local process of any user can reach the port. In Mode B (a
+  configured key) that means other local users could spend your allowance - see §13.
+- A service-scoped key sits in
+  `HKLM\SYSTEM\CurrentControlSet\Services\OpenCodeGoProxy\Environment` (administrators only)
+  or in `appsettings.Production.json` (restrict its ACL to the service account).
+- Prefer `-ServiceAccount LocalService` over `LocalSystem` unless something requires SYSTEM.
+
+## 17. Assumptions and deviations
 
 These decisions were made where the specification left room; each is cheap to change.
 
@@ -430,3 +552,11 @@ These decisions were made where the specification left room; each is cheap to ch
     prompts; bodies are still streamed and never buffered by the proxy.
 14. **`Proxy:SessionId`** is accepted as a config-key alias for
     `OPENCODE_GO_SESSION_ID` (convenient for tests); the environment variable wins.
+15. **Windows service support.** `AddWindowsService` is registered unconditionally but only
+    activates when the process was started by the SCM, so `dotnet run` and the tests are
+    unaffected. Service mode defaults the session store and log directory to
+    `%ProgramData%\OpenCodeGoProxy` because a service account has no usable `LOCALAPPDATA`.
+16. **File logging** is a small in-repo provider (`Logging/FileLoggerProvider.cs`) instead of
+    a third-party sink, keeping the dependency surface at one package. It is inert in
+    console mode unless `Proxy:LogDirectory` is configured, and it never throws into the
+    request path.

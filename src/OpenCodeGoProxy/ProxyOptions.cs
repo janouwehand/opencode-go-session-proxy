@@ -37,10 +37,19 @@ public sealed class ProxyOptions
     /// <summary>Directory where the persistent fallback session is stored.</summary>
     public required string SessionStorePath { get; init; }
 
-    /// <summary>Upstream API key (OPENCODE_GO_API_KEY). Never logged or returned to callers.</summary>
+    /// <summary>
+    /// Upstream API key. Read from OPENCODE_GO_API_KEY, falling back to Proxy:ApiKey.
+    /// Never logged or returned to callers.
+    /// </summary>
     public string? ApiKey { get; init; }
 
-    public static ProxyOptions FromConfiguration(IConfiguration configuration)
+    /// <summary>
+    /// Directory for rolling file logs. <c>null</c> means console-only logging (interactive use).
+    /// Services default to <c>&lt;CommonApplicationData&gt;\OpenCodeGoProxy\logs</c>.
+    /// </summary>
+    public string? LogDirectory { get; init; }
+
+    public static ProxyOptions FromConfiguration(IConfiguration configuration, bool runningAsWindowsService = false)
     {
         ArgumentNullException.ThrowIfNull(configuration);
 
@@ -97,9 +106,12 @@ public sealed class ProxyOptions
             _ => LogLevel.Information,
         };
 
-        var apiKey = Trimmed(configuration["OPENCODE_GO_API_KEY"]);
+        var apiKey = Trimmed(configuration["OPENCODE_GO_API_KEY"]) ?? Trimmed(configuration["Proxy:ApiKey"]);
         var sessionId = Trimmed(configuration["OPENCODE_GO_SESSION_ID"]) ?? Trimmed(configuration["Proxy:SessionId"]);
-        var storePath = Trimmed(configuration["Proxy:SessionStorePath"]) ?? DefaultSessionStorePath();
+        var storePath = Trimmed(configuration["Proxy:SessionStorePath"]) ??
+            (runningAsWindowsService ? DefaultServiceDataDirectory() : DefaultSessionStorePath());
+        var logDirectory = Trimmed(configuration["Proxy:LogDirectory"]) ??
+            (runningAsWindowsService ? Path.Combine(DefaultServiceDataDirectory(), "logs") : null);
 
         return new ProxyOptions
         {
@@ -114,11 +126,20 @@ public sealed class ProxyOptions
             SessionId = sessionId,
             SessionStorePath = storePath,
             ApiKey = apiKey,
+            LogDirectory = logDirectory,
         };
     }
 
     public static string DefaultSessionStorePath() => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "OpenCodeGoProxy");
+
+    /// <summary>
+    /// Per-machine data directory used when running as a Windows Service. The service account
+    /// (LocalSystem) has no usable LOCALAPPDATA, so it must not be used for service state.
+    /// </summary>
+    public static string DefaultServiceDataDirectory() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "OpenCodeGoProxy");
 
     public static bool IsLoopbackHost(string host) =>
