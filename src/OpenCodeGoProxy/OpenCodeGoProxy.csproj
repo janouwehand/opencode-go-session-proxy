@@ -18,6 +18,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Adds IHostLifetime support for running as a Windows Service. -->
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.15" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Single config file at the workspace root, copied next to the executable. -->
     <Content Include="..\..\appsettings.json" Link="appsettings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

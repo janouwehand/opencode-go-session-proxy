@@ -75,6 +75,66 @@ public class ConfigurationTests
     }
 
     [Fact]
+    public void ApiKey_FallsBackToConfiguration()
+    {
+        var options = ProxyOptions.FromConfiguration(Build(("Proxy:ApiKey", "  config-key  ")));
+
+        Assert.Equal("config-key", options.ApiKey);
+    }
+
+    [Fact]
+    public void ApiKey_PrefersEnvironmentVariable()
+    {
+        var options = ProxyOptions.FromConfiguration(
+            Build(("OPENCODE_GO_API_KEY", "env-key"), ("Proxy:ApiKey", "config-key")));
+
+        Assert.Equal("env-key", options.ApiKey);
+    }
+
+    [Fact]
+    public void InteractiveMode_UsesLocalAppDataAndConsoleOnlyLogging()
+    {
+        var options = ProxyOptions.FromConfiguration(Build());
+
+        Assert.Equal(ProxyOptions.DefaultSessionStorePath(), options.SessionStorePath);
+        Assert.Null(options.LogDirectory);
+    }
+
+    [Fact]
+    public void WindowsServiceDefaults_UseMachineWideDataDirectory()
+    {
+        var dataDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "OpenCodeGoProxy");
+
+        var options = ProxyOptions.FromConfiguration(Build(), runningAsWindowsService: true);
+
+        Assert.Equal(dataDirectory, options.SessionStorePath);
+        Assert.Equal(Path.Combine(dataDirectory, "logs"), options.LogDirectory);
+        Assert.EndsWith(Path.Combine("OpenCodeGoProxy", "logs"), options.LogDirectory, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExplicitLogDirectory_WinsOverServiceDefault()
+    {
+        var options = ProxyOptions.FromConfiguration(
+            Build(("Proxy:LogDirectory", "  C:\\proxy-logs  ")),
+            runningAsWindowsService: true);
+
+        Assert.Equal("C:\\proxy-logs", options.LogDirectory);
+    }
+
+    [Fact]
+    public void ExplicitSessionStorePath_WinsOverServiceDefault()
+    {
+        var options = ProxyOptions.FromConfiguration(
+            Build(("Proxy:SessionStorePath", "C:\\proxy-sessions")),
+            runningAsWindowsService: true);
+
+        Assert.Equal("C:\\proxy-sessions", options.SessionStorePath);
+    }
+
+    [Fact]
     public async Task RealServer_BindsOnlyToLoopback()
     {
         await using var proxy = await ProxyServer.StartAsync("http://127.0.0.1:1");

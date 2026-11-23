@@ -1,4 +1,6 @@
 using System.Net;
+using Microsoft.Extensions.Logging.EventLog;
+using OpenCodeGoProxy.Logging;
 
 namespace OpenCodeGoProxy;
 
@@ -20,11 +22,11 @@ public static class ProxyApp
     public const string ModelsPath = "/v1/models";
     public const string HealthPath = "/healthz";
 
-    public static WebApplication Build(WebApplicationBuilder builder)
+    public static WebApplication Build(WebApplicationBuilder builder, bool runningAsWindowsService = false)
     {
         ArgumentNullException.ThrowIfNull(builder);
 
-        var options = ProxyOptions.FromConfiguration(builder.Configuration);
+        var options = ProxyOptions.FromConfiguration(builder.Configuration, runningAsWindowsService);
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton<SessionResolver>();
         builder.Services.AddSingleton<ProxyForwarder>();
@@ -44,9 +46,21 @@ public static class ProxyApp
                 ConnectTimeout = TimeSpan.FromSeconds(20),
             });
 
+        if (options.LogDirectory is not null)
+        {
+            builder.Logging.AddProvider(new FileLoggerProvider(options.LogDirectory));
+        }
+
         builder.Logging.AddFilter("OpenCodeGoProxy", options.ProxyLogLevel);
         builder.Logging.AddFilter("System.Net.Http", LogLevel.Warning);
         builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
+
+        // A Windows Service also logs to the Event Log; keep it to Warning+ to avoid
+        // writing several Information entries per proxied request.
+        if (OperatingSystem.IsWindows())
+        {
+            builder.Logging.AddFilter<EventLogLoggerProvider>(level => level >= LogLevel.Warning);
+        }
 
         builder.WebHost.UseUrls($"http://{options.BindHost}:{options.Port}");
         builder.WebHost.ConfigureKestrel(kestrel =>
@@ -72,11 +86,13 @@ public static class ProxyApp
 
         app.Lifetime.ApplicationStarted.Register(() =>
             app.Logger.LogInformation(
-                "Proxy started on http://{Host}:{Port} -> {Upstream} (session mode: {SessionMode})",
+                "Proxy started on http://{Host}:{Port} -> {Upstream} (session mode: {SessionMode}, session store: {SessionStore}, log directory: {LogDirectory})",
                 options.BindHost,
                 options.Port,
                 options.UpstreamBaseUrl,
-                options.SessionMode));
+                options.SessionMode,
+                options.SessionStorePath,
+                options.LogDirectory ?? "(console only)"));
 
         if (!string.Equals(options.SessionMode, "Auto", StringComparison.OrdinalIgnoreCase))
         {
